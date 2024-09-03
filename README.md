@@ -1,2 +1,3 @@
 # java-project-tool
-A simple java project management tool
+
+A simple tool to help manager your java project
