@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
-
 JAVA_PROJECT_TOOL_VERSION="0.0.1"
 
 JARS_LIB_DIR=~/lib/java/jars
@@ -109,26 +107,26 @@ function project_config__get_java_source_directory()
 
 function project_config__get_java_resource_directory()
 {
-    local value=$(jq -r '. | (
-      if .resourceDirectory == null then "" else .resourceDirectory end
-    )' $PROJECT_CONFIG_FILE_NAME)
-    echo "${value:-$PROJECT_CONFIG_DEFAULT_JAVA_RESOURCE_DIR}"
+  local value=$(jq -r '. | (
+    if .resourceDirectory == null then "" else .resourceDirectory end
+  )' $PROJECT_CONFIG_FILE_NAME)
+  echo "${value:-$PROJECT_CONFIG_DEFAULT_JAVA_RESOURCE_DIR}"
 }
 
 function project_config__get_java_build_directory()
 {
-    local value=$(jq -r '. | (
-      if .buildDirectory == null then "" else .buildDirectory end
-    )' $PROJECT_CONFIG_FILE_NAME)
-    echo "${value:-$PROJECT_CONFIG_DEFAULT_JAVA_BUILD_DIR}"
+  local value=$(jq -r '. | (
+    if .buildDirectory == null then "" else .buildDirectory end
+  )' $PROJECT_CONFIG_FILE_NAME)
+  echo "${value:-$PROJECT_CONFIG_DEFAULT_JAVA_BUILD_DIR}"
 }
 
 function project_config__get_main_classname()
 {
-    local value=$(jq -r '. | (
-      if .mainClassname == null then "" else .mainClassname end
-    )' $PROJECT_CONFIG_FILE_NAME)
-    echo "$value"
+  local value=$(jq -r '. | (
+    if .mainClassname == null then "" else .mainClassname end
+  )' $PROJECT_CONFIG_FILE_NAME)
+  echo "$value"
 }
 
 function project_config__get_jar_dependency_entries()
@@ -158,6 +156,8 @@ function project_config__get_jar_dependency_entries()
     return 1
   fi
 
+  local jar_dep_entry=""
+
   for jar_dep_entry in ${jar_dependency_entries[@]}; do
     local jar_dep_entry_scope=$(jar_dependency_entry__get_scope $jar_dep_entry)
 
@@ -167,10 +167,25 @@ function project_config__get_jar_dependency_entries()
   done
 }
 
+function project_config__has_jar_dependency_entry()
+{
+  local jar_dep_entries=($(project_config__get_jar_dependency_entries))
+  local jar_dep_entry=""
+
+  for jar_dep_entry in ${jar_dep_entries[@]}; do
+    if [ "$1" == "$jar_dep_entry" ]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 function build_classpath_from_jar_dependency_entries()
 {
   local entry_flag_param=$1
   local jar_path_entries=()
+  local jar_dep_entry=""
 
   for jar_file_entry in $(project_config__get_jar_dependency_entries $entry_flag_param); do
     local dirpath=$(jar_dependency_entry__to_absolute_path $jar_file_entry)
@@ -183,16 +198,28 @@ function build_classpath_from_jar_dependency_entries()
 
 function load_jar_dependency()
 {
+  if jar_dependency_entry__is_jar_loaded $jar_dep_entry; then
+    return 0
+  fi
+
   local jar_remote_url=$(jar_dependency_entry__to_maven_repo_url $1)
   local head_response=$(curl "$jar_remote_url" -I -s -w '%{http_code}')
   local response_status_code=$(tail -1 <<< "$head_response")
 
+  printf "loading $jar_dep_entry... "
+
   if [ "$response_status_code" != "200" ]; then
+    local exit_code=0
+
     case "$response_status_code" in
-      "404" ) return 1 ;;
-      "000" ) return 2 ;;
-      * ) return 3 ;;
+      "404" ) exit_code=1 ;;
+      "000" ) exit_code=2 ;;
+      * ) exit_code=3 ;;
     esac
+
+    echo "failed ($exit_code)" 
+
+    return $exit_code
   fi
 
   local jar_base_path=$(jar_dependency_entry__to_base_path $1)
@@ -206,24 +233,20 @@ function load_jar_dependency()
   
   popd > /dev/null
   popd > /dev/null
+
+  echo done
 }
 
 function load_all_jar_dependencies()
 {
   local load_jar_failures=0
+  local jar_dep_entry=""
 
   for jar_dep_entry in $(project_config__get_jar_dependency_entries --scope=all); do
-    if ! jar_dependency_entry__is_jar_loaded $jar_dep_entry; then
-      printf "loading $jar_dep_entry... "
-      load_jar_dependency $jar_dep_entry
-      local load_result=$?
-      case "$load_result" in
-        0 ) echo done ;;
-        * )
-          echo "failed ($load_result)" 
-          load_jar_failures=1
-          ;;
-      esac
+    load_jar_dependency $jar_dep_entry
+    local load_result=$?
+    if [ load_result -ne 0 ]; then
+      load_jar_failures=1
     fi
   done
 
@@ -257,6 +280,46 @@ function build_project()
   fi
 
   cp -R ${resource_dir}/ $build_dir
+}
+
+function add_dependencies()
+{
+  local json=$(project_config__get_json_content)
+  local jar_dep_entry=""
+  local added_entries=()
+
+  for jar_dep_entry in $@; do
+    if project_config__has_jar_dependency_entry $jar_dep_entry; then
+      continue
+    fi
+
+    local parsed_entry=($(jar_dependency_entry__parse $jar_dep_entry))
+    local groupId=${parsed_entry[JAR_DEPENDENCY_ENTRY_PARAM_INDEX_GROUP_ID]}
+    local artifactId=${parsed_entry[JAR_DEPENDENCY_ENTRY_PARAM_INDEX_ARTIFACT_ID]}
+    local version=${parsed_entry[JAR_DEPENDENCY_ENTRY_PARAM_INDEX_VERSION]}
+    local scope=${parsed_entry[JAR_DEPENDENCY_ENTRY_PARAM_INDEX_SCOPE]}
+    local new_json_dep_entry="groupId: \"$groupId\", artifactId: \"$artifactId\", version: \"$version\""
+
+    if [ "$scope" != "$JAR_DEPENDENCY_ENTRY_DEFAULT_SCOPE" ]; then
+      new_json_dep_entry="$new_json_dep_entry, scope: \"$scope\""
+    fi
+
+    local jq_statement=".dependencies |= . + [{ $new_json_dep_entry }]"
+
+    json=$(jq "$jq_statement" <<< "$json")
+
+    added_entries=("${added_entries[@]}" "$jar_dep_entry")
+  done
+
+  cat <<JSON > $PROJECT_CONFIG_FILE_NAME
+$json
+JSON
+
+  local added_entry=""
+
+  for added_entry in ${added_entries[@]}; do
+    load_jar_dependency $added_entry
+  done
 }
 
 function clean()
@@ -294,6 +357,7 @@ case "$COMMAND" in
   "clean" ) clean ;;
   "app" ) run_app "$@" ;;
   "run" ) run ;;
+  "add" ) add_dependencies "$@" ;;
   "version" ) print_tool_version ;;
   * )
     echo invalid command $COMMAND
