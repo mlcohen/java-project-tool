@@ -4,15 +4,25 @@ JARS_LIB_DIR=~/lib/java/jars
 MAVEN_REPO_BASE_URL=https://repo1.maven.org/maven2/
 
 PROJECT_CONFIG_FILE_NAME="project.json"
-PROJECT_CONFIG_DEFAULT_JAVA_SOURCE_DIR="./src/main/java"
-PROJECT_CONFIG_DEFAULT_JAVA_RESOURCE_DIR="./src/main/resources"
-PROJECT_CONFIG_DEFAULT_JAVA_BUILD_DIR="./build"
+PROJECT_CONFIG_DEFAULT_JAVA_SOURCE_DIR="src/main/java"
+PROJECT_CONFIG_DEFAULT_JAVA_RESOURCE_DIR="src/main/resources"
+PROJECT_CONFIG_DEFAULT_JAVA_BUILD_DIR="build"
 
 JAR_DEPENDENCY_ENTRY_DEFAULT_SCOPE="implementation"
 JAR_DEPENDENCY_ENTRY_PARAM_INDEX_GROUP_ID=0
 JAR_DEPENDENCY_ENTRY_PARAM_INDEX_ARTIFACT_ID=1
 JAR_DEPENDENCY_ENTRY_PARAM_INDEX_VERSION=2
 JAR_DEPENDENCY_ENTRY_PARAM_INDEX_SCOPE=3
+
+JAVA_PROJECT_CONFIG_TEMPLATE=""
+IFS='' read -r -d '' JAVA_PROJECT_CONFIG_TEMPLATE <<"EOF"
+{
+  "sourceDirectory": "{{SOURCE_DIR}}",
+  "resourcesDirectory": "{{RESOURCES_DIR}}",
+  "buildDirectory": "{{BUILD_DIR}}",
+  "dependencies": []
+}
+EOF
 
 function jar_dependency_entry__parse()
 {
@@ -198,11 +208,13 @@ function build_classpath_from_jar_dependency_entries()
 
 function load_jar_dependency()
 {
+  local jar_dep_entry=$1
+
   if jar_dependency_entry__is_jar_loaded $jar_dep_entry; then
     return 0
   fi
 
-  local jar_remote_url=$(jar_dependency_entry__to_maven_repo_url $1)
+  local jar_remote_url=$(jar_dependency_entry__to_maven_repo_url $jar_dep_entry)
   local head_response=$(curl "$jar_remote_url" -I -s -w '%{http_code}')
   local response_status_code=$(tail -1 <<< "$head_response")
 
@@ -322,6 +334,20 @@ JSON
   done
 }
 
+function init_project()
+{
+  local template="$JAVA_PROJECT_CONFIG_TEMPLATE"
+
+  template=$(sed "s|{{SOURCE_DIR}}|$PROJECT_CONFIG_DEFAULT_JAVA_SOURCE_DIR|" <<< "$template")
+  template=$(sed "s|{{RESOURCES_DIR}}|$PROJECT_CONFIG_DEFAULT_JAVA_RESOURCE_DIR|" <<< "$template")
+  template=$(sed "s|{{BUILD_DIR}}|$PROJECT_CONFIG_DEFAULT_JAVA_BUILD_DIR|" <<< "$template")
+
+  mkdir -p $PROJECT_CONFIG_DEFAULT_JAVA_SOURCE_DIR
+  mkdir -p $PROJECT_CONFIG_DEFAULT_JAVA_RESOURCE_DIR
+
+  printf "$template\n" > $PROJECT_CONFIG_FILE_NAME
+}
+
 function clean()
 {
   local build_dir=$(project_config__get_java_build_directory)
@@ -358,6 +384,7 @@ case "$COMMAND" in
   "app" ) run_app "$@" ;;
   "run" ) run ;;
   "add" ) add_dependencies "$@" ;;
+  "init" ) init_project "$@" ;;
   "version" ) print_tool_version ;;
   * )
     echo invalid command $COMMAND
